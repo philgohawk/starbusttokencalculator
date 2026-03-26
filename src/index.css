@@ -1,0 +1,25 @@
+@import 'tailwindcss';
+
+html {
+  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+}
+
+body {
+  margin: 0;
+  min-height: 100svh;
+}
+
+/* Speedtest-style gauge animation */
+@keyframes gauge-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.65;
+  }
+}
+
+.gauge-measuring {
+  animation: gauge-pulse 1.2s ease-in-out infinite;
+}
