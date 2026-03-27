@@ -3,13 +3,36 @@ import { estimateCostUsd } from '../lib/countTokens'
 
 const apiBase = import.meta.env.VITE_API_BASE ?? ''
 
+type LlmMeasured = {
+  source: 'openai'
+  model: string
+  starburst: {
+    promptTokens: number
+    completionTokens: number
+    outputText: string
+  }
+  s3Style: {
+    promptTokens: number
+    completionTokens: number
+    outputText: string
+  }
+}
+
+type LlmNone = {
+  source: 'none'
+  reason: 'missing_api_key' | 'error'
+  detail?: string
+}
+
 type CompareResponseOk = {
   ok: true
   starburstContext: string
   s3StyleContext: string
-  tokenCounts: { starburst: number; s3Style: number }
+  contextTokensLocal: { starburst: number; s3Style: number }
+  llm: LlmMeasured | LlmNone
   charCounts: { starburst: number; s3Style: number }
   timingsMs: { starburst: number; s3: number; total: number }
+  timingsMsLlm?: { starburst: number; s3: number; total: number }
   warnings: string[]
 }
 
@@ -29,6 +52,7 @@ export function LiveComparePanel({ pricePerMillion }: Props) {
   const [hints, setHints] = useState<string[]>([])
   const [data, setData] = useState<CompareResponseOk | null>(null)
   const [showContexts, setShowContexts] = useState(false)
+  const [showLlmReplies, setShowLlmReplies] = useState(true)
 
   const run = async () => {
     setLoading(true)
@@ -48,7 +72,7 @@ export function LiveComparePanel({ pricePerMillion }: Props) {
         setHints(fail.hints ?? [])
         return
       }
-      setData(j)
+      setData(j as CompareResponseOk)
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Request failed')
       setHints([
@@ -60,13 +84,37 @@ export function LiveComparePanel({ pricePerMillion }: Props) {
     }
   }
 
-  const sbTok = data?.tokenCounts.starburst ?? 0
-  const s3Tok = data?.tokenCounts.s3Style ?? 0
-  const ratio = s3Tok > 0 ? sbTok / s3Tok : 0
-  const pct =
-    s3Tok > 0 ? ((s3Tok - sbTok) / s3Tok) * 100 : sbTok === 0 ? 0 : 100
-  const sbCost = estimateCostUsd(sbTok, pricePerMillion)
-  const s3Cost = estimateCostUsd(s3Tok, pricePerMillion)
+  const ctxSb = data?.contextTokensLocal.starburst ?? 0
+  const ctxS3 = data?.contextTokensLocal.s3Style ?? 0
+
+  const api = data?.llm?.source === 'openai' ? data.llm : null
+  const llmSkipped =
+    data?.llm?.source === 'none' ? data.llm : null
+
+  const sbPrompt = api?.starburst.promptTokens ?? 0
+  const sbCompl = api?.starburst.completionTokens ?? 0
+  const s3Prompt = api?.s3Style.promptTokens ?? 0
+  const s3Compl = api?.s3Style.completionTokens ?? 0
+  const sbApiTotal = api ? sbPrompt + sbCompl : 0
+  const s3ApiTotal = api ? s3Prompt + s3Compl : 0
+
+  const ratioCtx = ctxS3 > 0 ? ctxSb / ctxS3 : 0
+  const pctCtx =
+    ctxS3 > 0 ? ((ctxS3 - ctxSb) / ctxS3) * 100 : ctxSb === 0 ? 0 : 100
+
+  const ratioApi =
+    api && s3ApiTotal > 0 ? sbApiTotal / s3ApiTotal : 0
+  const pctApi =
+    api && s3ApiTotal > 0
+      ? ((s3ApiTotal - sbApiTotal) / s3ApiTotal) * 100
+      : 0
+
+  const sbCostApi = api
+    ? estimateCostUsd(sbApiTotal, pricePerMillion)
+    : 0
+  const s3CostApi = api
+    ? estimateCostUsd(s3ApiTotal, pricePerMillion)
+    : 0
 
   const fmtUsd = (n: number) =>
     n.toLocaleString(undefined, {
@@ -88,16 +136,16 @@ export function LiveComparePanel({ pricePerMillion }: Props) {
         Live compare: Starburst Galaxy vs S3 listing
       </h2>
       <p className="mt-2 text-sm text-slate-400">
-        The backend runs read-only SQL against{' '}
-        <strong className="text-slate-300">information_schema</strong> in
-        Galaxy (optionally scoped with{' '}
-        <code className="text-cyan-200/90">STARBURST_TABLE</code>, e.g.{' '}
-        <code className="text-cyan-200/90">kaggle_tx_data</code>) and a capped{' '}
-        <strong className="text-slate-300">S3 ListObjects</strong>{' '}
-        inventory. It builds two representative “tool + context” strings and
-        counts tokens with the same <code className="text-cyan-200/90">cl100k_base</code>{' '}
-        encoder as the simulator above. Secrets stay on the server (
-        <code className="rounded bg-black/40 px-1">server/.env</code>).
+        Fetches bounded <strong className="text-slate-300">information_schema</strong>{' '}
+        metadata and an S3 listing, then builds two context strings. With{' '}
+        <code className="text-cyan-200/90">OPENAI_API_KEY</code> set on the API,
+        each path runs one real{' '}
+        <strong className="text-slate-300">Chat Completions</strong> call and
+        records <code className="text-cyan-200/90">usage.prompt_tokens</code> and{' '}
+        <code className="text-cyan-200/90">completion_tokens</code> from the
+        provider (not local estimates). Local{' '}
+        <code className="text-cyan-200/90">cl100k_base</code> counts on the raw
+        context-only strings are shown for comparison.
       </p>
 
       <button
@@ -127,18 +175,62 @@ export function LiveComparePanel({ pricePerMillion }: Props) {
 
       {data ? (
         <div className="mt-4 space-y-4">
+          {api ? (
+            <p className="text-xs text-slate-400">
+              LLM: <span className="text-slate-200">{api.model}</span> · API
+              timings: Starburst {data.timingsMsLlm?.starburst ?? '—'} ms · S3{' '}
+              {data.timingsMsLlm?.s3 ?? '—'} ms · {data.timingsMsLlm?.total ?? '—'}{' '}
+              ms
+            </p>
+          ) : llmSkipped?.reason === 'error' ? (
+            <p className="rounded-lg border border-amber-500/25 bg-amber-950/15 p-2 text-xs text-amber-100/90">
+              LLM usage measurement failed (key may be set; check model and API
+              response):{' '}
+              <span className="font-mono text-amber-200/95">
+                {llmSkipped.detail ?? 'unknown error'}
+              </span>
+            </p>
+          ) : (
+            <p className="rounded-lg border border-amber-500/25 bg-amber-950/15 p-2 text-xs text-amber-100/90">
+              No API usage: set <code className="text-amber-200">OPENAI_API_KEY</code>{' '}
+              in <code className="text-amber-200">server/.env</code> or{' '}
+              <code className="text-amber-200">server/src/.env</code>, restart the
+              API, then try again (optional{' '}
+              <code className="text-amber-200">OPENAI_MODEL</code>,{' '}
+              <code className="text-amber-200">OPENAI_BASE_URL</code>).
+            </p>
+          )}
+
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="rounded-xl bg-black/35 p-3 ring-1 ring-emerald-500/30">
               <p className="text-xs font-semibold uppercase tracking-wide text-emerald-300/90">
                 SQL engine path (Starburst)
               </p>
-              <p className="mt-1 font-mono text-2xl font-bold tabular-nums text-white">
-                {data.tokenCounts.starburst.toLocaleString()}
+              {api ? (
+                <>
+                  <p className="mt-1 font-mono text-xl font-bold tabular-nums text-white">
+                    {sbPrompt.toLocaleString()}{' '}
+                    <span className="text-sm font-normal text-slate-500">
+                      in
+                    </span>{' '}
+                    · {sbCompl.toLocaleString()}{' '}
+                    <span className="text-sm font-normal text-slate-500">
+                      out
+                    </span>
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    Σ {sbApiTotal.toLocaleString()} (provider billable)
+                  </p>
+                </>
+              ) : (
+                <p className="mt-1 text-sm text-slate-500">No LLM call</p>
+              )}
+              <p className="mt-2 border-t border-white/10 pt-2 font-mono text-sm tabular-nums text-slate-400">
+                context-only (local cl100k): {ctxSb.toLocaleString()}
               </p>
-              <p className="text-xs text-slate-500">input tokens (estimate)</p>
-              {pricePerMillion > 0 ? (
+              {api && pricePerMillion > 0 ? (
                 <p className="mt-1 text-sm text-emerald-200/90">
-                  ~{fmtUsd(sbCost)} / prompt
+                  ~{fmtUsd(sbCostApi)} round-trip @ $/1M (same rate in+out)
                 </p>
               ) : null}
             </div>
@@ -146,34 +238,88 @@ export function LiveComparePanel({ pricePerMillion }: Props) {
               <p className="text-xs font-semibold uppercase tracking-wide text-amber-200/80">
                 Naive LLM + S3 listing path
               </p>
-              <p className="mt-1 font-mono text-2xl font-bold tabular-nums text-amber-100">
-                {data.tokenCounts.s3Style.toLocaleString()}
+              {api ? (
+                <>
+                  <p className="mt-1 font-mono text-xl font-bold tabular-nums text-amber-100">
+                    {s3Prompt.toLocaleString()}{' '}
+                    <span className="text-sm font-normal text-slate-500">
+                      in
+                    </span>{' '}
+                    · {s3Compl.toLocaleString()}{' '}
+                    <span className="text-sm font-normal text-slate-500">
+                      out
+                    </span>
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    Σ {s3ApiTotal.toLocaleString()} (provider billable)
+                  </p>
+                </>
+              ) : (
+                <p className="mt-1 text-sm text-slate-500">No LLM call</p>
+              )}
+              <p className="mt-2 border-t border-white/10 pt-2 font-mono text-sm tabular-nums text-slate-400">
+                context-only (local cl100k): {ctxS3.toLocaleString()}
               </p>
-              <p className="text-xs text-slate-500">input tokens (estimate)</p>
-              {pricePerMillion > 0 ? (
+              {api && pricePerMillion > 0 ? (
                 <p className="mt-1 text-sm text-amber-200/80">
-                  ~{fmtUsd(s3Cost)} / prompt
+                  ~{fmtUsd(s3CostApi)} round-trip @ $/1M (same rate in+out)
                 </p>
               ) : null}
             </div>
           </div>
 
+          {api ? (
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => setShowLlmReplies((v) => !v)}
+                className="text-sm font-medium text-violet-300 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+              >
+                {showLlmReplies ? 'Hide' : 'Show'} LLM completions (verbatim)
+              </button>
+              {showLlmReplies ? (
+                <div className="grid gap-3 lg:grid-cols-2">
+                  <div>
+                    <h3 className="mb-1 text-xs font-semibold text-emerald-300/80">
+                      SQL engine path (Starburst) — model output
+                    </h3>
+                    <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950/80 p-2 text-[11px] leading-relaxed text-slate-300 ring-1 ring-emerald-500/20">
+                      {api.starburst.outputText ||
+                        '(No assistant text in API response.)'}
+                    </pre>
+                  </div>
+                  <div>
+                    <h3 className="mb-1 text-xs font-semibold text-amber-200/80">
+                      Naive LLM + S3 listing — model output
+                    </h3>
+                    <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950/80 p-2 text-[11px] leading-relaxed text-slate-300 ring-1 ring-amber-500/20">
+                      {api.s3Style.outputText ||
+                        '(No assistant text in API response.)'}
+                    </pre>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           <div className="flex flex-wrap gap-2">
-            {s3Tok > sbTok ? (
-              <span className="rounded-full bg-emerald-500/20 px-3 py-1 text-xs font-semibold text-emerald-200 ring-1 ring-emerald-400/40">
-                Starburst context ≈ {(ratio * 100).toFixed(1)}% of S3-listing
-                context ({pct.toFixed(1)}% fewer tokens vs S3 path)
+            {ctxS3 > ctxSb ? (
+              <span className="rounded-full bg-slate-600/30 px-3 py-1 text-xs text-slate-300">
+                Context-only (cl100k): Starburst ≈ {(ratioCtx * 100).toFixed(1)}
+                % of S3 ({pctCtx.toFixed(1)}% fewer)
               </span>
-            ) : (
-              <span className="rounded-full bg-slate-600/40 px-3 py-1 text-xs text-slate-300">
-                S3 sample not larger than SQL metadata — widen{' '}
-                <code className="text-cyan-200">MAX_S3_OBJECTS</code> or narrow Starburst
-                columns.
-              </span>
-            )}
+            ) : null}
+            {api && s3ApiTotal > sbApiTotal ? (
+              <>
+                <span className="rounded-full bg-emerald-500/20 px-3 py-1 text-xs font-semibold text-emerald-200 ring-1 ring-emerald-400/40">
+                  API round-trip: Starburst ≈ {(ratioApi * 100).toFixed(1)}% of
+                  S3 ({pctApi.toFixed(1)}% fewer tokens)
+                </span>
+              </>
+            ) : null}
             <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-400">
-              Starburst {data.timingsMs.starburst} ms · S3 {data.timingsMs.s3}{' '}
-              ms · total {data.timingsMs.total} ms
+              Data prep: Starburst {data.timingsMs.starburst} ms · S3{' '}
+              {data.timingsMs.s3} ms · total {data.timingsMs.total} ms
             </span>
           </div>
 

@@ -18,6 +18,7 @@ describe('formatStarburstSqlEngineContext', () => {
     expect(s).toContain('catalog=lake')
     expect(s).toContain('schema=sales')
     expect(s).toContain('orders\tid\tbigint')
+    expect(s).toContain('MANDATORY PRE-FLIGHT')
     expect(s).not.toContain('[truncated')
   })
 
@@ -56,6 +57,6 @@ describe('formatS3DirectLlmContext', () => {
     expect(s).toContain('bucket=my-bucket')
     expect(s).toContain('prefix=data/')
     expect(s).toContain('data/a.parquet\t1024')
-    expect(s).toContain('infer file formats')
+    expect(s).toContain('ListObjectsV2')
   })
 })

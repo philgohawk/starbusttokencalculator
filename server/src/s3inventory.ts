@@ -20,7 +20,7 @@ export function loadS3Env(): S3Env | null {
   const prefix = process.env.S3_PREFIX?.trim() ?? ''
   const maxObjects = Math.min(
     20_000,
-    Math.max(10, Number(process.env.MAX_S3_OBJECTS) || 1200),
+    Math.max(10, Number(process.env.MAX_S3_OBJECTS) || 2500),
   )
   return { region, bucket, prefix, maxObjects }
 }

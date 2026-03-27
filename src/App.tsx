@@ -34,6 +34,17 @@ export default function App() {
   const [hasRun, setHasRun] = useState(false)
   const [standardTokens, setStandardTokens] = useState(0)
   const [starbustTokens, setStarbustTokens] = useState(0)
+  const [standardLlm, setStandardLlm] = useState<{
+    prompt: number
+    completion: number
+    outputText?: string
+  } | null>(null)
+  const [starbustLlm, setStarbustLlm] = useState<{
+    prompt: number
+    completion: number
+    outputText?: string
+  } | null>(null)
+  const [llmMeasureNote, setLlmMeasureNote] = useState<string | null>(null)
 
   const buildOpts = useCallback((): BuildPromptOptions => {
     return {
@@ -49,20 +60,75 @@ export default function App() {
     starbustSchemaTokenMultiplier,
   ])
 
-  const runTest = () => {
+  const runTest = async () => {
     const opts = buildOpts()
     setMeasuring(true)
     setHasRun(false)
-    window.setTimeout(() => {
-      const stdParts = buildStandardParts(tables, opts)
-      const sbParts = buildStarbustParts(tables, opts)
-      const st = countPromptParts(stdParts, 1)
-      const sb = countPromptParts(sbParts, starbustSchemaTokenMultiplier)
-      setStandardTokens(st)
-      setStarbustTokens(sb)
+    setStandardLlm(null)
+    setStarbustLlm(null)
+    setLlmMeasureNote(null)
+
+    const stdParts = buildStandardParts(tables, opts)
+    const sbParts = buildStarbustParts(tables, opts)
+    const st = countPromptParts(stdParts, 1)
+    const sb = countPromptParts(sbParts, starbustSchemaTokenMultiplier)
+    setStandardTokens(st)
+    setStarbustTokens(sb)
+
+    const stdFull = buildStandardPrompt(tables, opts)
+    const sbFull = buildStarbustPrompt(tables, opts)
+
+    try {
+      const r = await fetch(
+        `${import.meta.env.VITE_API_BASE ?? ''}/api/measure-llm-tokens`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            standardPrompt: stdFull,
+            starbustPrompt: sbFull,
+          }),
+        },
+      )
+      const j = (await r.json()) as {
+        ok?: boolean
+        error?: string
+        standard?: {
+          promptTokens: number
+          completionTokens: number
+          outputText?: string
+        }
+        starbust?: {
+          promptTokens: number
+          completionTokens: number
+          outputText?: string
+        }
+      }
+      if (j.ok && j.standard) {
+        setStandardLlm({
+          prompt: j.standard.promptTokens,
+          completion: j.standard.completionTokens,
+          outputText: j.standard.outputText,
+        })
+      }
+      if (j.ok && j.starbust) {
+        setStarbustLlm({
+          prompt: j.starbust.promptTokens,
+          completion: j.starbust.completionTokens,
+          outputText: j.starbust.outputText,
+        })
+      }
+      if (!j.ok) {
+        setLlmMeasureNote(j.error ?? 'LLM token measurement failed')
+      }
+    } catch {
+      setLlmMeasureNote(
+        'Could not reach /api/measure-llm-tokens — run the API with OPENAI_API_KEY.',
+      )
+    } finally {
       setMeasuring(false)
       setHasRun(true)
-    }, 420)
+    }
   }
 
   const opts = buildOpts()
@@ -91,14 +157,14 @@ export default function App() {
             Starbust Token Calculator
           </h1>
           <p className="mx-auto mt-3 max-w-xl text-sm text-slate-400 sm:text-base">
-            Estimate input tokens for{' '}
-            <strong className="text-slate-200">Standard LLM-to-SQL</strong> vs a{' '}
-            <strong className="text-cyan-200">Starbust-style</strong> compact
-            prompt. Built with{' '}
-            <code className="rounded bg-black/40 px-1 text-cyan-200/90">
-              cl100k_base
-            </code>{' '}
-            (typical OpenAI-class tokenization).
+            Estimate <strong className="text-slate-200">input</strong> tokens
+            locally (<code className="text-cyan-200/90">cl100k_base</code>) and{' '}
+            <strong className="text-slate-200">prompt + completion</strong> from
+            the Chat Completions API when{' '}
+            <code className="text-cyan-200/90">OPENAI_API_KEY</code> is set on
+            the server. Compares <strong className="text-slate-200">Standard LLM-to-SQL</strong>{' '}
+            vs a <strong className="text-cyan-200">Starbust-style</strong> compact
+            prompt (typical OpenAI-class tokenization for the local part).
           </p>
         </header>
 
@@ -262,6 +328,9 @@ export default function App() {
               starbustRatio={starbustRatio}
               standardTokens={standardTokens}
               starbustTokens={starbustTokens}
+              standardLlm={standardLlm}
+              starbustLlm={starbustLlm}
+              llmMeasureNote={llmMeasureNote}
               standardCost={stdCost}
               starbustCost={sbCost}
               pctSaved={pctSaved}
